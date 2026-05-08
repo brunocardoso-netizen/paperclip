@@ -913,6 +913,22 @@ export function prioritizeProjectWorkspaceCandidatesForRun<T extends ProjectWork
   return [rows[preferredIndex]!, ...rows.slice(0, preferredIndex), ...rows.slice(preferredIndex + 1)];
 }
 
+export function resolveProjectWorkspaceQuerySource(input: {
+  workspaceProjectId: string | null;
+  preferredProjectWorkspaceId: string | null;
+  useProjectWorkspace: boolean;
+}):
+  | { type: "by_project_id"; projectId: string }
+  | { type: "by_workspace_id"; workspaceId: string }
+  | { type: "none" } {
+  if (!input.useProjectWorkspace) return { type: "none" };
+  if (input.workspaceProjectId) return { type: "by_project_id", projectId: input.workspaceProjectId };
+  if (input.preferredProjectWorkspaceId) {
+    return { type: "by_workspace_id", workspaceId: input.preferredProjectWorkspaceId };
+  }
+  return { type: "none" };
+}
+
 function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
@@ -2421,18 +2437,34 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const useProjectWorkspace = opts?.useProjectWorkspace !== false;
     const workspaceProjectId = useProjectWorkspace ? resolvedProjectId : null;
 
-    const unorderedProjectWorkspaceRows = workspaceProjectId
-      ? await db
-          .select()
-          .from(projectWorkspaces)
-          .where(
-            and(
-              eq(projectWorkspaces.companyId, agent.companyId),
-              eq(projectWorkspaces.projectId, workspaceProjectId),
-            ),
-          )
-          .orderBy(asc(projectWorkspaces.createdAt), asc(projectWorkspaces.id))
-      : [];
+    const workspaceQuerySource = resolveProjectWorkspaceQuerySource({
+      workspaceProjectId,
+      preferredProjectWorkspaceId,
+      useProjectWorkspace,
+    });
+    const unorderedProjectWorkspaceRows =
+      workspaceQuerySource.type === "by_project_id"
+        ? await db
+            .select()
+            .from(projectWorkspaces)
+            .where(
+              and(
+                eq(projectWorkspaces.companyId, agent.companyId),
+                eq(projectWorkspaces.projectId, workspaceQuerySource.projectId),
+              ),
+            )
+            .orderBy(asc(projectWorkspaces.createdAt), asc(projectWorkspaces.id))
+        : workspaceQuerySource.type === "by_workspace_id"
+          ? await db
+              .select()
+              .from(projectWorkspaces)
+              .where(
+                and(
+                  eq(projectWorkspaces.companyId, agent.companyId),
+                  eq(projectWorkspaces.id, workspaceQuerySource.workspaceId),
+                ),
+              )
+          : [];
     const projectWorkspaceRows = prioritizeProjectWorkspaceCandidatesForRun(
       unorderedProjectWorkspaceRows,
       preferredProjectWorkspaceId,
@@ -4165,16 +4197,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     // When setting status to error, also update agentRuntimeState.lastError
     // to prevent error status with null lastError (BRA-469, BRA-464 pattern)
+    console.log('[BRA-469 trace] finalizeAgentStatus:', { agentId, nextStatus, errorMessage, outcome });
     if (nextStatus === "error") {
-      await db
+      const result = await db
         .update(agentRuntimeState)
         .set({
           lastError: errorMessage || "unknown_error",
           updatedAt: new Date(),
         })
-        .where(eq(agentRuntimeState.agentId, agentId));
-    } else if (nextStatus === "idle" || nextStatus === "running") {
-      // Clear lastError when returning to normal operation
+        .where(eq(agentRuntimeState.agentId, agentId))
+        .returning();
+      console.log('[BRA-469 trace] agentRuntimeState update result:', { agentId, rowsAffected: result.length, lastError: result[0]?.lastError });
+    } else if ((nextStatus === "idle" || nextStatus === "running") && outcome === "succeeded") {
+      // Clear lastError only on successful completion, not manual recovery
+      // This preserves diagnostic evidence when errors are manually cleared
       await db
         .update(agentRuntimeState)
         .set({
