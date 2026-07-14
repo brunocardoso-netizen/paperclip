@@ -330,19 +330,56 @@ export function agentRoutes(
     };
   }
 
+  async function buildAgentRunSummary(agentId: string) {
+    const [lastAny, lastSucceeded, lastFailed] = await Promise.all([
+      db
+        .select({ finishedAt: heartbeatRuns.finishedAt, createdAt: heartbeatRuns.createdAt })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.agentId, agentId))
+        .orderBy(desc(heartbeatRuns.createdAt))
+        .limit(1),
+      db
+        .select({ finishedAt: heartbeatRuns.finishedAt })
+        .from(heartbeatRuns)
+        .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "succeeded")))
+        .orderBy(desc(heartbeatRuns.finishedAt))
+        .limit(1),
+      db
+        .select({ id: heartbeatRuns.id, finishedAt: heartbeatRuns.finishedAt, error: heartbeatRuns.error })
+        .from(heartbeatRuns)
+        .where(and(eq(heartbeatRuns.agentId, agentId), inArray(heartbeatRuns.status, ["failed", "timed_out"])))
+        .orderBy(desc(heartbeatRuns.finishedAt))
+        .limit(1),
+    ]);
+    const lastRunTimestamp = lastAny[0]?.finishedAt ?? lastAny[0]?.createdAt ?? null;
+    return {
+      lastRunAt: lastRunTimestamp?.toISOString() ?? null,
+      lastSuccessfulRunAt: lastSucceeded[0]?.finishedAt?.toISOString() ?? null,
+      lastError: lastFailed[0]?.finishedAt
+        ? {
+            message: lastFailed[0].error ?? "Run failed",
+            occurredAt: lastFailed[0].finishedAt.toISOString(),
+            runId: lastFailed[0].id,
+          }
+        : null,
+    };
+  }
+
   async function buildAgentDetail(
     agent: NonNullable<Awaited<ReturnType<typeof svc.getById>>>,
     options?: { restricted?: boolean },
   ) {
-    const [chainOfCommand, accessState] = await Promise.all([
+    const [chainOfCommand, accessState, runSummary] = await Promise.all([
       svc.getChainOfCommand(agent.id),
       buildAgentAccessState(agent),
+      buildAgentRunSummary(agent.id),
     ]);
 
     return {
       ...(options?.restricted ? redactForRestrictedAgentView(agent) : agent),
       chainOfCommand,
       access: accessState,
+      ...runSummary,
     };
   }
 

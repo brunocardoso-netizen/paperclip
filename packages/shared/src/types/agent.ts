@@ -88,6 +88,13 @@ export interface Agent {
 export interface AgentDetail extends Agent {
   chainOfCommand: AgentChainOfCommandEntry[];
   access: AgentAccessState;
+  lastRunAt: string | null;
+  lastSuccessfulRunAt: string | null;
+  lastError: {
+    message: string;
+    occurredAt: string;
+    runId?: string;
+  } | null;
 }
 
 export interface AgentKeyCreated {
